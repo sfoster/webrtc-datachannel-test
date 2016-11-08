@@ -1,121 +1,59 @@
-var PORT = 8080;
-var express = require('express');
-var main = express();
-var http = require('http');
-var server = http.createServer(main)
-var io  = require('socket.io').listen(server);
-// io.set('log level', 1);
+var WebSocketServer = require('ws').Server;
+var url = require('url');
+var wss = new WebSocketServer({ port: 8080 });
 
-server.listen(PORT, null, function() {
-    console.log("Listening on port " + PORT);
-});
-// main.use(express.bodyParser());
-
-// From: https://github.com/anoek/webrtc-group-chat-example/blob/master/signaling-server.js
-
-var DEFAULT_CHANNEL = 'foo';
-var allChannels = {}; // each pair gets its own channel
-var sockets =  {};
-var deviceSocketsIdsMap =  {};
+var clientSockets = {};
 
 function getChannelForDeviceId(id) {
   var channelId = id.replace(/-[ab]$/i, '');
   return channelId;
 }
-function isValidDeviceId(id) {
-  // TODO: some sanity check and lookup here
-  return !!id;
-}
+
 function getChannelHost(channel) {
   for(var id in channel) {
-    return id;
+    return channel[id];
   }
 }
-/**
- * Devices will connect to the signaling server, passing a deviceid in the querystring.
- * Each device gets assigned to a channel based on its deviceid
- * The signaling server keeps track of all sockets who are in a channel,
- * and on alive will send out 'addPeer' events to each pair
- * of users in a channel. When clients receive the 'addPeer' even they'll begin
- * setting up an RTCPeerConnection with one another. During this process they'll
- * need to relay ICECandidate information to one another, as well as SessionDescription
- * information. After all of that happens, they'll finally be able to complete
- * the peer connection and will be streaming audio/video between eachother.
- */
-io.sockets.on('connection', function(socket) {
-  var deviceId = socket.handshake.query.deviceid;
-  if (!isValidDeviceId(deviceId)) {
-    console.warn('Unexpected socket connection, invalid device id');
-    // probably better to do this in some auth/access-control middleware
-    // as the client will probably just keep trying to connect
-    socket.disconnect();
+
+wss.on('connection', function connection(ws) {
+  var location = url.parse(ws.upgradeReq.url, true);
+  var deviceId = location.query.deviceid;
+  if (deviceId) {
+    clientSockets[deviceId] = ws;
+  } else {
+    console.log('Unexpected connection: ', ws);
     return;
   }
-  sockets[socket.id] = socket;
-  deviceSocketsIdsMap[deviceId] = socket.id;
-  console.log('socket connected, deviceid: ',  deviceId);
+  console.log('deviceId connected: ' + deviceId);
 
-  socket.on('disconnect', function() {
-    console.log('socket: ' + socket.id + ' disconnected');
-    // signal to pair?
-    delete sockets[socket.id];
-    delete deviceSocketsIdsMap[deviceId];
-  });
+  ws.on('message', function incoming(_message) {
+    message = JSON.parse(_message.toString());
+    console.log('received message:', message);
+    wss.clients.forEach(function each(client) {
+      if (client === ws) {
+        return;
+      }
 
-  var channelId = getChannelForDeviceId(deviceId);
-  var channel = allChannels[channelId] || (allChannels[channelId] = {});
-  var peerIds = Object.keys(channel)
-  var isHost = !peerIds.length;
-
-  socket.emit('welcome', {
-    peers: peerIds
-  });
-  channel[deviceId] = socket;
-
-  if (!isHost) {
-    if (peerIds.length) {
-      console.log('There are ' + peerIds.length + ' members in channel: ' + channelId);
-    }
-    var channelHost = getChannelHost(channel);
-
-    // tell the channel host to offer a connection to the new peer
-    channel[channelHost].emit('peerConnect', {
-      'peerId': deviceId
+      if ('candidate' in message) {
+        console.log('relaying candidate message');
+        client.send(_message);
+      }
+      else if ('sdp' in message) {
+        console.log('relaying sdp message');
+        client.send(_message);
+      }
     });
+  });
+
+  if (Object.keys(clientSockets).length > 1) {
+    getChannelHost(clientSockets).send(JSON.stringify({
+      'makeOffer': true
+    }));
   }
 
-  socket.on('relaySessionDescription', function(message) {
-      var deviceId = message.to;
-      var session_description = message.session_description;
-      console.log("["+ deviceId + "] relaying session description to [" + deviceId + "] ", session_description);
-
-      var socketId = deviceSocketsIdsMap[deviceId];
-      var socket = socketId && sockets[socketId];
-      if (socket) {
-          socket.emit('sessionDescription', {
-            'from': message.from,
-            'to:': deviceId,
-            'session_description': session_description});
-      } else {
-        console.warn('No socket found for deviceId: ' + deviceId + ' and socketId: ' + socketId);
-      }
-  });
-
-  socket.on('relayICECandidate', function(config) {
-      var peer_id = config.peer_id;
-      var ice_candidate = config.ice_candidate;
-      console.log("["+ socket.id + "] relaying ICE candidate to [" + peer_id + "] ", ice_candidate);
-
-      if (peer_id in sockets) {
-          sockets[peer_id].emit('iceCandidate', {'peer_id': socket.id, 'ice_candidate': ice_candidate});
-      }
-  });
-
+  // ws.send(JSON.stringify({
+  //   welcome: Object.keys(clientSockets)
+  // }));
 });
 
-io.sockets.on('disconnect', function(socket) {
-  console.log('disconnect');
-  var channelId = getChannelForDeviceId(socket.id);
-  var channel = allChannels[channelId] || (allChannels[channelId] = {});
-
-});
+console.log('Listening for socket connections on: ', wss.options.host + ':' + wss.options.port);

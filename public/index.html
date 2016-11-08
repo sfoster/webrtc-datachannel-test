@@ -36,7 +36,7 @@ The owner can issue an offer - this is proxied over the ws:
   </p>
 
   <script src="./adapter.js"></script>
-  <script src="https://cdn.socket.io/socket.io-1.4.5.js"></script>
+  <!-- script src="https://cdn.socket.io/socket.io-1.4.5.js"></script -->
   <script>
   'use strict';
   /** CONFIG **/
@@ -51,157 +51,104 @@ The owner can issue an offer - this is proxied over the ws:
   ];
   </script>
   <script>
-  'use strict';
-
-  function Client(id) {
-    this.id = id;
-    this.peers = {};
-  }
-  Client.prototype.connect = function() {
-    var signallingUrl = new URL(SIGNALING_SERVER);
-    signallingUrl.search = '?deviceid='+this.id;
-
-    console.log('Connecting to signalling server');
-    var ws = this.signallingWs = io.connect(SIGNALING_SERVER, {
-      query: 'deviceid=' + this.id
-    });
-    ws.on('connect', this.onWsConnect.bind(this));
-    ws.on('disconnect', this.onWsDisconnect.bind(this));
-    ws.on('peerConnect', this.onPeerConnect.bind(this));
-    ws.on('sessionDescription', this.onSessionDescription.bind(this));
-
-    ws.on('welcome', function(event) {
-      console.log('got welcome message: ', event);
-    });
+  var configuration = {
+    'iceServers': ICE_SERVERS
   };
-  Client.prototype.disconnect = function() {
-    // for (var connection in peers) {
-    //   connection.close();
-    // }
-    if (this.sendChannel) {
-      this.sendChannel.close();
-    }
-    if (this.signallingWs ) {
-      this.signallingWs.close();
-    }
-  }
+  var pc;
+  var signalingChannel;
+  var dataChannel;
+  // call start() to initiate
 
-  Client.prototype.onWsConnect = function() {
-    console.log('Connected to signalling server');
-    // just wait for a peer to connect
-    document.getElementById(this.id + '-btn').disabled = true;
-  };
-  Client.prototype.onWsDisconnect = function() {
-    console.log('Disconnected from signalling server');
-    document.getElementById(this.id + '-btn').disabled = false;
-  };
+  function start() {
+    console.log('start');
+    pc = new RTCPeerConnection(configuration);
+    dataChannel = pc.createDataChannel('foo');
 
-  Client.prototype.getOrCreateConnectionForPeer = function(peerId, isOwner) {
-    var peerConnection = this.peers[peerId];
-    if (peerConnection) {
-      console.log('getOrCreateConnectionForPeer: already connected to peer: ' + peerId, peerConnection);
-      return peerConnection;
-    }
-    var signallingWs = this.signallingWs;
-    peerConnection = new RTCPeerConnection(
-      {"iceServers": ICE_SERVERS},
-      {"optional": [{"DtlsSrtpKeyAgreement": true}]} /* this will no longer be needed by chrome
-                                                      * eventually (supposedly), but is necessary
-                                                      * for now to get firefox to talk to chrome */
-    );
-    console.log('getOrCreateConnectionForPeer, stashing peerConnection: ', peerId, peerConnection);
-    this.peers[peerId] = peerConnection;
-
-    this.sendChannel = peerConnection.createDataChannel("the-channel");
-    this.sendChannel.onopen = function(event) {
-      console.log('sendChannel opened');
-    };
-    this.sendChannel.onmessage = function(event) {
-      console.log('got datachannel mesage: ', event.data, event);
-    };
-    this.sendChannel.onclose = function() {
-      console.log('sendChannel closed');
-    };
-    return peerConnection;
-  };
-
-  Client.prototype.onPeerConnect = function(config) {
-    // connect and open a data channel to the newly joined peer
-    console.log('Got peerConnect with config: ', config);
-    var peerId = config.peerId;
-    this.isHost = true;
-    if (peerId in this.peers) {
-      console.warn('Already connected to peerId, ' + peerId);
-      return;
-    }
-    var peerConnection = this.getOrCreateConnectionForPeer(peerId, true);
-    this.offerConnectionToPeer(peerId, peerConnection, config);
-  };
-
-  Client.prototype.offerConnectionToPeer = function(peerId, peerConnection, config) {
-    var signallingWs = this.signallingWs;
-    var selfId = this.id;
-    if (this.isHost) { // I think this will only get called by the channel host
-      peerConnection.createOffer().then(function(sessionDesc) {
-        return peerConnection.setLocalDescription(sessionDesc);
-      }).catch(function(err) {
-        console.warn('Error creating offer: ', err);
-      })
-      .then(function() {
-        // send SDP to a remote peer via signalling server
-        console.log('host wants to relay session description: ', peerConnection.localDescription);
-        signallingWs.emit('relaySessionDescription',{
-          'from': selfId,
-          'to': peerId,
-          'session_description': peerConnection.localDescription,
-          'isOffer': true
-        });
-        console.log("Offer setLocalDescription succeeded");
-      });
-    } else {
-      console.warn('offerConnectionToPeer called by non-host');
-    }
-  };
-
-  Client.prototype.onSessionDescription = function(config) {
-    var peerId = config.from;
-    var selfId = this.id;
-    var signallingWs = this.signallingWs;
-    var peerConnection = this.getOrCreateConnectionForPeer(peerId);
-    var isOffer = config.session_description.type === 'offer';
-    console.log('Remote description received: ', config);
-
-    console.log('onSessionDescription: peerConnection: ' + peerId, peerConnection);
-    console.log(config.session_description);
-    var sessionDesc = new RTCSessionDescription(config.session_description);
-    var answerDesc;
-    peerConnection.setRemoteDescription(sessionDesc).then(function() {
-      if (isOffer) {
-        peerConnection.createAnswer().then(function(localDesc) {
-          return peerConnection.setLocalDescription(localDesc);
-        }).then(function() {
-          signallingWs.emit('relaySessionDescription',{
-            'to': peerId,
-            'from': selfId,
-            'session_description': peerConnection.localDescription
-          });
-          console.log("Answer setLocalDescription succeeded");
-        }).catch(function(err) {
-          console.warn('Error answering with local description:', err);
-        });
+    // send any ice candidates to the other peer
+    pc.onicecandidate = function (evt) {
+      console.log('onicecandidate');
+      if (evt.candidate) {
+        signalingChannel.send(JSON.stringify({
+          'candidate': evt.candidate
+        }));
       }
-    }).catch(function(err) {
-      console.warn('error setting remote description: ', err);
-    });
-  };
+    };
+
+    // let the 'negotiationneeded' event trigger offer generation
+    pc.onnegotiationneeded = function () {
+      console.log('onnegotiationneeded');
+      pc.createOffer(localDescCreated, logError);
+    }
+
+    // once remote data arrives, show it
+    pc.ondatachannel = function (evt) {
+      console.log('got datachannel on this peerConnection');
+      var channel = evt.channel;
+      channel.onopen = function() {
+        console.log('channel opened:', channel, channel === dataChannel);
+        channel.send('boo');
+      }
+      channel.onclose = function() {
+        console.log('channel closed');
+      }
+      channel.onmessage = function(event) {
+        console.info('channel message: ', event.data);
+      }
+    };
+  }
+
+  function localDescCreated(desc) {
+    console.log('localDescCreated');
+    pc.setLocalDescription(desc, function () {
+      signalingChannel.send(JSON.stringify({
+        'sdp': pc.localDescription
+      }));
+    }, logError);
+  }
+
+  function logError(error) {
+    console.log(error.name + ': ' + error.message);
+  }
+
 
   function connectAs(deviceId) {
-    var selfClient = window.selfClient = new Client(deviceId);
-    selfClient.connect();
+    var signalingUrl = new URL('ws://'+SIGNALING_SERVER);
+    signalingUrl.search = '?deviceid='+deviceId;
+    console.log('signalingUrl: ', signalingUrl.toString());
+
+    signalingChannel = new WebSocket(signalingUrl.toString());
+
+    signalingChannel.onmessage = function (evt) {
+      var message = JSON.parse(evt.data.toString());
+      if (message.welcome) {
+        console.log('got welcome message: ', message);
+      } else if (message.makeOffer) {
+        console.log('got makeOffer ws message');
+        pc.createOffer(localDescCreated, logError);
+      }
+      else if (message.sdp) {
+        pc.setRemoteDescription(new RTCSessionDescription(message.sdp), function () {
+          // if we received an offer, we need to answer
+          if (pc.remoteDescription.type == 'offer')
+            pc.createAnswer(localDescCreated, logError);
+        }, logError);
+      }
+      else if (message.candidate) {
+        pc.addIceCandidate(new RTCIceCandidate(message.candidate));
+      }
+    };
+
+    if (!pc) {
+      start();
+    }
   }
 
   function stop() {
     selfClient.disconnect();
+  }
+
+  function sendMessage(msg) {
+    dataChannel.send(msg);
   }
   </script>
 </body>
