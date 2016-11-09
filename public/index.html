@@ -11,9 +11,8 @@ This back channel is to talk to establish presence and relay session connection 
 
 Server gets the incoming ws connection, which includes a channel id (pair id) in the querystring
 The first client to connect becomes owner/host of this channel
-Subsequent clients: the host is sent a peerConnect message with the peer's id
 The owner can issue an offer - this is proxied over the ws:
-  owner creates RTCPeerConnection, creates DataChannel and addStream(?)
+  owner creates RTCPeerConnection, creates DataChannel
   owner creates offer with conn.createOffer()
   owner configures own end of connection using offer: conn.setLocalDescription(offer)
   owner sends this offer over ws. to the new recipient
@@ -35,12 +34,19 @@ The owner can issue an offer - this is proxied over the ws:
     <button id="device-b-btn" onclick="connectAs('device-b')">Connect As Device-B</button>
   </p>
 
+  <h2>Send File</h2>
+  <p>
+    <button onclick="sendFile('files/audio-1.mp3')">audio-1.mp3</button>
+    <button onclick="sendFile('files/audio-2.mp3')">audio-2.mp3</button>
+  </p>
+  <audio controls></audio>
+
   <script src="./adapter.js"></script>
   <!-- script src="https://cdn.socket.io/socket.io-1.4.5.js"></script -->
   <script>
   'use strict';
   /** CONFIG **/
-  var SIGNALING_SERVER = "localhost:8080";
+  var SIGNALING_SERVER = location.hostname + ":8080";
   /** You should probably use a different stun server doing commercial stuff **/
   /** Also see: https://gist.github.com/zziuni/3741933 **/
   var ICE_SERVERS = [
@@ -57,6 +63,7 @@ The owner can issue an offer - this is proxied over the ws:
   var pc;
   var signalingChannel;
   var dataChannel;
+  var deviceId;
   // call start() to initiate
 
   function start() {
@@ -74,7 +81,7 @@ The owner can issue an offer - this is proxied over the ws:
       }
     };
 
-    // let the 'negotiationneeded' event trigger offer generation
+    // 'negotiationneeded' is not getting fired?
     pc.onnegotiationneeded = function () {
       console.log('onnegotiationneeded');
       pc.createOffer(localDescCreated, logError);
@@ -82,18 +89,18 @@ The owner can issue an offer - this is proxied over the ws:
 
     // once remote data arrives, show it
     pc.ondatachannel = function (evt) {
-      console.log('got datachannel on this peerConnection');
+      console.log('got datachannel on this peerConnection:', evt);
       var channel = evt.channel;
-      channel.onopen = function() {
-        console.log('channel opened:', channel, channel === dataChannel);
-        channel.send('boo');
+      var parts = [];
+      channel.onopen = function(evt) {
+        console.log('channel opened:', channel, evt);
+        console.log('channel onopen evt:', evt);
+        dataChannel.send('hello from: ' + deviceId);
       }
       channel.onclose = function() {
         console.log('channel closed');
       }
-      channel.onmessage = function(event) {
-        console.info('channel message: ', event.data);
-      }
+      channel.onmessage = dataReceiver.onMessage.bind(dataReceiver);
     };
   }
 
@@ -110,8 +117,8 @@ The owner can issue an offer - this is proxied over the ws:
     console.log(error.name + ': ' + error.message);
   }
 
-
   function connectAs(deviceId) {
+    window.deviceId = deviceId;
     var signalingUrl = new URL('ws://'+SIGNALING_SERVER);
     signalingUrl.search = '?deviceid='+deviceId;
     console.log('signalingUrl: ', signalingUrl.toString());
@@ -143,6 +150,59 @@ The owner can issue an offer - this is proxied over the ws:
     }
   }
 
+  function playBlobAsAudio(blob) {
+    var sourceUrl = URL.createObjectURL(blob)
+    var audio = document.querySelector('audio');
+    audio.src = sourceUrl;
+    audio.load();
+    audio.play();
+  }
+
+  var dataReceiver = {
+    state: '',
+    contentType: null,
+    chunks: [],
+    completeFileReceived: function() {
+      var fileBlob = new Blob(this.chunks, { type: this.contentType || '' });
+      console.log('got fileBlob: ', fileBlob);
+      this.chunks.length = 0;
+      this.contentType = null;
+      this.state = '';
+      playBlobAsAudio(fileBlob);
+    },
+    onMessage: function(event) {
+      var type = event.data instanceof Blob  ? 'blob': 'string';
+      var nextState;
+      console.log('onMessage, state: ' + this.state, type, event.data);
+      switch (this.state) {
+        case 'receiving-chunks' :
+          if (type === 'string' && event.data === '\n\n') {
+            this.completeFileReceived();
+          } else if (type === 'blob') {
+            this.chunks.push(event.data);
+          } else {
+            console.warn('unexpected message content: ', type, event);
+          }
+          break;
+        case '' :
+          if (type === 'string') {
+            if (event.data.indexOf('{') > -1 &&
+                event.data.indexOf('contentType') > -1) {
+              var header = JSON.parse(event.data);
+              this.contentType = header.contentType;
+              this.state = 'receiving-chunks';
+            } else {
+              // generic message, unrelated to our file-sending/receiving
+              console.log('DataChannel message: ', event.data);
+            }
+          } else {
+            console.warn('unexpected message content: ', type, event);
+          }
+          break;
+      }
+    }
+  }
+
   function stop() {
     selfClient.disconnect();
   }
@@ -150,6 +210,95 @@ The owner can issue an offer - this is proxied over the ws:
   function sendMessage(msg) {
     dataChannel.send(msg);
   }
+
+  function sendFile(url) {
+    var fileSender = new FileSender(dataChannel);
+    fileSender.send(url);
+  }
+
+  function FileSender(dataChannel, options) {
+    this.dataChannel = dataChannel;
+    if (options) {
+      for (var key in options) {
+        this[key] = options[key];
+      }
+    }
+  }
+
+  FileSender.prototype = {
+    totalSize: 0,
+    lastChunkSize: 0,
+    offset: 0,
+    CHUNK_SIZE: 1024 * 16,
+    fileBlob: null,
+    contentType: null,
+
+    send: function(url) {
+      if (!(this.dataChannel && this.dataChannel.readyState == 'open')) {
+        console.warn('Data channel not ready');
+        return;
+      }
+      if (url) {
+        this.url = url;
+      }
+      console.assert(this.url);
+      dataChannel.binaryType = 'blob';
+
+      window.fetch(this.url).then(function(res) {
+        return res.blob();
+      }).then(function(fileBlob) {
+        this.fileBlob = fileBlob;
+        console.log('fetched: ' + url, fileBlob);
+        this.totalSize = fileBlob.size;
+        this.contentType = fileBlob.type;
+        this.sendHeader();
+        window.setTimeout(this.nextChunk.bind(this), 0);
+      }.bind(this)).catch(function(e) {
+        console.error('Failed to fetch file: ', e);
+      });
+      // could return promise at completion?
+    },
+    nextChunk: function() {
+      console.log('next: totalSize: %s, offset: %s, lastChunkSize: %s',
+                  this.totalSize, this.offset, this.lastChunkSize);
+      if (this.totalSize > this.offset + this.lastChunkSize) {
+        var chunk = this.fileBlob.slice(this.offset, this.offset+this.CHUNK_SIZE, this.contentType);
+        this.sendChunk(chunk);
+        this.offset += this.CHUNK_SIZE;
+      } else {
+        this.sendEOF();
+      }
+    },
+    sendHeader: function() {
+      console.log('sendHeader');
+      if (!(this.dataChannel && this.dataChannel.readyState == 'open')) {
+        console.warn('Data channel not ready');
+        return;
+      }
+      this.dataChannel.send(JSON.stringify({
+        contentType: this.contentType,
+        url: this.url
+      }));
+    },
+    sendEOF: function() {
+      console.log('sendEOF');
+      if (!(this.dataChannel && this.dataChannel.readyState == 'open')) {
+        console.warn('Data channel not ready');
+        return;
+      }
+      this.dataChannel.send('\n\n');
+    },
+    sendChunk: function(chunk) {
+      this.lastChunkSize = chunk.size;
+      if (this.dataChannel.readyState !== 'open') {
+        console.log('dataChannel closed mid-send');
+        return;
+      }
+      this.dataChannel.send(chunk);
+      window.setTimeout(this.nextChunk.bind(this), 0);
+    }
+  };
+
   </script>
 </body>
 </html>
