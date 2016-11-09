@@ -27,7 +27,13 @@ wss.on('connection', function connection(ws) {
   console.log('deviceId connected: ' + deviceId);
 
   ws.on('message', function incoming(_message) {
-    message = JSON.parse(_message.toString());
+    if (!_message.includes('}')) {
+      // is just a test/debug message
+      console.log(_message);
+      ws.send('acknowleded: ' + _message);
+      return;
+    }
+    var message = JSON.parse(_message.toString());
     console.log('received message:', message);
     wss.clients.forEach(function each(client) {
       if (client === ws) {
