@@ -42,113 +42,235 @@ The owner can issue an offer - this is proxied over the ws:
   <audio controls></audio>
 
   <script src="./adapter.js"></script>
-  <!-- script src="https://cdn.socket.io/socket.io-1.4.5.js"></script -->
   <script>
   'use strict';
-  /** CONFIG **/
-  var SIGNALING_SERVER = location.hostname + ":8080";
-  /** You should probably use a different stun server doing commercial stuff **/
-  /** Also see: https://gist.github.com/zziuni/3741933 **/
-  var ICE_SERVERS = [
-    {urls:"stun:stun.l.google.com:19305"},
-    {urls:"stun:stun1.l.google.com:19305"},
-    {urls:"stun:stun2.l.google.com:19305"},
-    {urls:"stun:stun3.l.google.com:19305"}
-  ];
-  </script>
-  <script>
+
   var configuration = {
-    'iceServers': ICE_SERVERS
+    /** You should probably use a different stun server doing commercial stuff **/
+    /** Also see: https://gist.github.com/zziuni/3741933 **/
+    'iceServers': [
+      {urls:"stun:stun.l.google.com:19305"},
+      {urls:"stun:stun1.l.google.com:19305"},
+      {urls:"stun:stun2.l.google.com:19305"},
+      {urls:"stun:stun3.l.google.com:19305"}
+    ],
+    'signalingURLProtocol': 'ws:',
+    'signalingURLHostname': location.hostname,
+    'signalingURLPort': '8080',
+    'dataChannelLabel': 'dc',
   };
-  var pc;
-  var signalingChannel;
-  var dataChannel;
-  var deviceId;
-  // call start() to initiate
 
-  function start() {
-    console.log('start');
-    pc = new RTCPeerConnection(configuration);
-    dataChannel = pc.createDataChannel('foo');
+  // prepare config
+  // make a new peerConnection
+  //  talk to signalling server
+  //  establish datachannel
+  //  connect/disconnect
+  //  sendMessage
+  //  sendFile
+  //  on
 
-    // send any ice candidates to the other peer
-    pc.onicecandidate = function (evt) {
-      console.log('onicecandidate');
-      if (evt.candidate) {
-        signalingChannel.send(JSON.stringify({
-          'candidate': evt.candidate
-        }));
-      }
-    };
 
-    // 'negotiationneeded' is not getting fired?
-    pc.onnegotiationneeded = function () {
-      console.log('onnegotiationneeded');
-      pc.createOffer(localDescCreated, logError);
-    }
-
-    // once remote data arrives, show it
-    pc.ondatachannel = function (evt) {
-      console.log('got datachannel on this peerConnection:', evt);
-      var channel = evt.channel;
-      var parts = [];
-      channel.onopen = function(evt) {
-        console.log('channel opened:', channel, evt);
-        console.log('channel onopen evt:', evt);
-        dataChannel.send('hello from: ' + deviceId);
-      }
-      channel.onclose = function() {
-        console.log('channel closed');
-      }
-      channel.onmessage = dataReceiver.onMessage.bind(dataReceiver);
-    };
+  function DeviceConnection(id, config) {
+    this.id = id;
+    this.config = Object.assign({
+      signalingURLProtocol: 'ws:',
+      signalingURLHostname: '0.0.0.0',
+      signalingURLPort: '8080',
+      signalingURLPath: '/'
+    }, config);
   }
+  DeviceConnection.prototype = {
+    dataChannel: null,
 
-  function localDescCreated(desc) {
-    console.log('localDescCreated');
-    pc.setLocalDescription(desc, function () {
-      signalingChannel.send(JSON.stringify({
-        'sdp': pc.localDescription
-      }));
-    }, logError);
-  }
+    logError: function(error) {
+      console.log(
+        'ERROR: ' + this.deviceId + ':' +
+        error.name + ': ' + error.message
+      );
+    },
+    log: function() {
+      var args = Array.prototype.slice.apply(arguments);
+      args.unshift('LOG:' + this.id + ':')
+      console.log.apply(console, args);
+    },
 
-  function logError(error) {
-    console.log(error.name + ': ' + error.message);
-  }
+    get signalingUrl() {
+      var url = '';
+      var config = this.config;
+      url += config.signalingURLProtocol;
+      url += '//';
+      url += config.signalingURLHostname;
+      url += ':';
+      url += config.signalingURLPort;
+      url += config.signalingURLPath;
+      url += '?deviceid=' + this.id;
+      return url;
+    },
 
-  function connectAs(deviceId) {
-    window.deviceId = deviceId;
-    var signalingUrl = new URL('ws://'+SIGNALING_SERVER);
-    signalingUrl.search = '?deviceid='+deviceId;
-    console.log('signalingUrl: ', signalingUrl.toString());
+    connect: function() {
+      var localDescCreated = (desc) => {
+        this.log('localDescCreated');
+        this.peerConnection.setLocalDescription(desc, () => {
+          this.signalingSocket.send(JSON.stringify({
+            'sdp': this.peerConnection.localDescription
+          }));
+        }, this.logError.bind(this));
+      };
 
-    signalingChannel = new WebSocket(signalingUrl.toString());
+      return this.openSignalingSocket()
+      .catch((err) => {
+        this.logError(err);
+      })
+      .then((ws) => {
+        this.createPeerDataChannel();
 
-    signalingChannel.onmessage = function (evt) {
-      var message = JSON.parse(evt.data.toString());
-      if (message.welcome) {
-        console.log('got welcome message: ', message);
-      } else if (message.makeOffer) {
-        console.log('got makeOffer ws message');
-        pc.createOffer(localDescCreated, logError);
+        this.log('signaling ws open: ', this.signalingSocket);
+        this.log('peerConnection created: ', this.peerConnection);
+        this.log('dataChannel open: ', this.dataChannel);
+        var pc = this.peerConnection;
+        var ws = this.signalingSocket;
+
+        // hook up the rest of the handlers for the peer connection
+        pc.onicecandidate = (evt) => {
+          // send any ice candidates to the other peer
+          this.log('onicecandidate');
+          if (evt.candidate) {
+            ws.send(JSON.stringify({
+              'candidate': evt.candidate
+            }));
+          }
+        };
+
+        // 'negotiationneeded' is not getting fired?
+        pc.onnegotiationneeded = () => {
+          this.log('onnegotiationneeded');
+          pc.createOffer(localDescCreated, this.logError.bind(this));
+        }
+
+        pc.ondatachannel = (evt) => {
+          // once remote data arrives, show it
+          this.log('got datachannel on this peerConnection:', evt);
+          var channel = evt.channel;
+          var parts = [];
+          channel.onopen = (evt) => {
+            this.log('channel opened:', channel, evt);
+            this.dataChannel.send('hello from: ' + this.id);
+          }
+          channel.onclose = () => {
+            this.log('channel closed');
+          }
+          channel.onmessage = dataReceiver.onMessage.bind(dataReceiver);
+        };
+
+        // hook up the rest of the handlers on the signalling websocket
+        ws.onmessage = (evt) => {
+          var message = JSON.parse(evt.data.toString());
+          if (message.welcome) {
+            this.log('got welcome message: ', message);
+          } else if (message.makeOffer) {
+            this.log('got makeOffer ws message');
+            this.peerConnection.createOffer(localDescCreated, this.logError.bind(this));
+          }
+          else if (message.sdp) {
+            pc.setRemoteDescription(new RTCSessionDescription(message.sdp), () => {
+              // if we received an offer, we need to answer
+              if (pc.remoteDescription.type == 'offer') {
+                pc.createAnswer(localDescCreated, this.logError.bind(this));
+              }
+            }, this.logError.bind(this));
+          }
+          else if (message.candidate) {
+            pc.addIceCandidate(new RTCIceCandidate(message.candidate));
+          }
+        };
+        ws.onclose = () => {
+          this.log('signaling websocket connection closed');
+          if (this._reconnectOnClose) {
+            setTimeout(this.connect.bind(this), 0);
+          }
+        };
+        ws.onerror = this.logError;
+      })
+      .catch((e) => {
+        this.logError(e);
+      });
+    },
+    openSignalingSocket: function() {
+      // open a websocket to the signaling server
+      // exchange offers and open a WebRTC DataChannel to the peer
+      var deviceId = this.id;
+      var signalingUrl = this.signalingUrl;
+      this.log('signalingUrl: ', signalingUrl);
+
+      var ws = this.signalingSocket;
+      return new Promise((res, rej) => {
+        var wsReadyState = ws && ws.readyState;
+        console.log('openSignalingSocket, wsReadyState: ', wsReadyState);
+        switch (wsReadyState) {
+          case 0:
+            // connecting
+            console.log('socket is connecting, resolve');
+            ws.onopen = () => { res(ws) };
+            break;
+          case 1:
+            // already open, we can use as-is
+            console.log('socket already open, resolve');
+            setTimeout(() => { res(ws)}, 0);
+            break;
+          case 2:
+            // connection is closing, fall thru'
+          default:
+            ws = this.signalingSocket = new WebSocket(signalingUrl);
+            ws.onopen = () => {
+              console.log('new socket open, resolve');
+              res(ws)
+            };
+        }
+      });
+    },
+
+    createPeerDataChannel: function() {
+      console.log('openDataChannelToPeer');
+
+      var pc = this.peerConnection;
+      var pcConnectionState = pc && pc.connectionState;
+      switch (pcConnectionState) {
+        case 'new':
+        case 'connecting':
+        case 'connected':
+          // TODO: some timeout or other failed-to-eventually-connect handling here?
+          break;
+        case 'disconnected':
+        case 'failed':
+        case 'closed':
+        default:
+          pc = this.peerConnection = new RTCPeerConnection({
+            iceServers: this.config.iceServers
+          });
+          console.log('created new peerConnection');
+          break;
       }
-      else if (message.sdp) {
-        pc.setRemoteDescription(new RTCSessionDescription(message.sdp), function () {
-          // if we received an offer, we need to answer
-          if (pc.remoteDescription.type == 'offer')
-            pc.createAnswer(localDescCreated, logError);
-        }, logError);
+      var dataChannel = this.dataChannel;
+      var dataReadyState = dataChannel && dataChannel.readyState;
+      if (!dataChannel ||
+          dataChannel.readyState === 2 || dataChannel.readyState === 3) {
+        dataChannel = pc.createDataChannel(this.config.dataChannelLabel);
+        this.dataChannel = dataChannel;
+        console.log('created new dataChannel:', dataChannel.readyState, dataChannel);
       }
-      else if (message.candidate) {
-        pc.addIceCandidate(new RTCIceCandidate(message.candidate));
-      }
-    };
+      return dataChannel;
+    },
 
-    if (!pc) {
-      start();
-    }
-  }
+    disconnect: function() {},
+    sendMessage: function(msg) {
+      this.dataChannel.send(msg);
+    },
+    sendFile: function() {
+      var fileSender = new FileSender(dataChannel);
+      fileSender.send(url);
+    },
+    on: function() {}
+  };
 
   function playBlobAsAudio(blob) {
     var sourceUrl = URL.createObjectURL(blob)
@@ -204,16 +326,15 @@ The owner can issue an offer - this is proxied over the ws:
   }
 
   function stop() {
-    selfClient.disconnect();
+    deviceConnection.disconnect();
   }
 
   function sendMessage(msg) {
-    dataChannel.send(msg);
+    deviceConnection.sendMessage(msg);
   }
 
   function sendFile(url) {
-    var fileSender = new FileSender(dataChannel);
-    fileSender.send(url);
+    deviceConnection.sendFile(url, contentType);
   }
 
   function FileSender(dataChannel, options) {
@@ -244,16 +365,16 @@ The owner can issue an offer - this is proxied over the ws:
       console.assert(this.url);
       dataChannel.binaryType = 'blob';
 
-      window.fetch(this.url).then(function(res) {
+      window.fetch(this.url).then((res) => {
         return res.blob();
-      }).then(function(fileBlob) {
+      }).then((fileBlob) => {
         this.fileBlob = fileBlob;
         console.log('fetched: ' + url, fileBlob);
         this.totalSize = fileBlob.size;
         this.contentType = fileBlob.type;
         this.sendHeader();
         window.setTimeout(this.nextChunk.bind(this), 0);
-      }.bind(this)).catch(function(e) {
+      }).catch((e) => {
         console.error('Failed to fetch file: ', e);
       });
       // could return promise at completion?
@@ -298,6 +419,15 @@ The owner can issue an offer - this is proxied over the ws:
       window.setTimeout(this.nextChunk.bind(this), 0);
     }
   };
+
+  var gDeviceConnection;
+  function connectAs(deviceId) {
+    if (gDeviceConnection) {
+      gDeviceConnection.disconnect();
+    }
+    gDeviceConnection = new DeviceConnection(deviceId, configuration);
+    gDeviceConnection.connect();
+  }
 
   </script>
 </body>
