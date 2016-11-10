@@ -4,6 +4,7 @@ var Sound = require('node-aplay');
 var tmp = require('tmp');
 var fs = require('fs');
 var Url = require('url');
+var ursa = require('ursa');
 
 var RTCPeerConnection     = webrtc.RTCPeerConnection;
 var RTCSessionDescription = webrtc.RTCSessionDescription;
@@ -90,7 +91,20 @@ function connectAs(deviceId) {
   signalingUrl.search = '?deviceid='+deviceId;
   console.log('signalingUrl: ', Url.format(signalingUrl));
 
-  signalingChannel = new WebSocket(Url.format(signalingUrl));
+  var privkeyClient = ursa.createPrivateKey(fs.readFileSync('./clientkeys/privkey.pem'));
+  var pubkeyServer = ursa.createPublicKey(fs.readFileSync('./serverkeys/pubkey.pem'));
+  var msg = 'secret msg';
+  var encrypt = pubkeyServer.encrypt(msg, 'utf8', 'base64');
+  var sign = privkeyClient.hashAndSign('sha256', msg, 'utf8', 'base64');
+
+  var options = {
+    headers: {
+      encrypted: encrypt,
+      signed: sign
+    }
+  };
+
+  signalingChannel = new WebSocket(Url.format(signalingUrl), 'user-agent', options);
 
   signalingChannel.onmessage = function (evt) {
     var _message = evt.data.toString();
