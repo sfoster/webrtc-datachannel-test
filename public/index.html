@@ -154,12 +154,16 @@ The owner can issue an offer - this is proxied over the ws:
           var parts = [];
           channel.onopen = (evt) => {
             this.log('channel opened:', channel, evt);
+            this.emit('datachannelopen', evt);
             this.dataChannel.send('hello from: ' + this.id);
           }
           channel.onclose = () => {
+            this.emit('datachannelclose', evt);
             this.log('channel closed');
           }
-          channel.onmessage = dataReceiver.onMessage.bind(dataReceiver);
+          channel.onmessage = (evt) => {
+            this.emit('datachannelmessage', evt);
+          }
         };
 
         // hook up the rest of the handlers on the signalling websocket
@@ -260,16 +264,17 @@ The owner can issue an offer - this is proxied over the ws:
       }
       return dataChannel;
     },
-
-    disconnect: function() {},
+    disconnect: function() {
+      this.log('TODO: implement disconnect');
+    },
     sendMessage: function(msg) {
       this.dataChannel.send(msg);
     },
-    sendFile: function() {
-      var fileSender = new FileSender(dataChannel);
+    sendFile: function(url) {
+      var fileSender = new FileSender(this.dataChannel);
       fileSender.send(url);
     },
-    on: function() {}
+    emit: function() {}
   };
 
   function playBlobAsAudio(blob) {
@@ -326,15 +331,21 @@ The owner can issue an offer - this is proxied over the ws:
   }
 
   function stop() {
-    deviceConnection.disconnect();
+    gDeviceConnection.disconnect();
   }
 
   function sendMessage(msg) {
-    deviceConnection.sendMessage(msg);
+    gDeviceConnection.sendMessage(msg);
   }
 
   function sendFile(url) {
-    deviceConnection.sendFile(url, contentType);
+    var contentType = '';
+    if (url.endsWith('.mp3')) {
+      contentType = 'audio/mpeg';
+    } else if (url.endsWith('.wav')) {
+      contentType = 'audio/x-wav';
+    }
+    gDeviceConnection.sendFile(url, contentType);
   }
 
   function FileSender(dataChannel, options) {
@@ -363,7 +374,7 @@ The owner can issue an offer - this is proxied over the ws:
         this.url = url;
       }
       console.assert(this.url);
-      dataChannel.binaryType = 'blob';
+      this.dataChannel.binaryType = 'blob';
 
       window.fetch(this.url).then((res) => {
         return res.blob();
@@ -426,6 +437,17 @@ The owner can issue an offer - this is proxied over the ws:
       gDeviceConnection.disconnect();
     }
     gDeviceConnection = new DeviceConnection(deviceId, configuration);
+    // implement a browser-friendly emit
+    gDeviceConnection.emit = function(type, event) {
+      switch (type) {
+        case 'datachannelopen':
+          this.dataChannel.send('hello from: ' + this.id);
+          break;
+        case 'datachannelmessage':
+          dataReceiver.onMessage(event);
+          break;
+      }
+    }
     gDeviceConnection.connect();
   }
 
