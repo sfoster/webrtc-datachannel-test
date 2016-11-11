@@ -1,6 +1,29 @@
 var WebSocketServer = require('ws').Server;
 var url = require('url');
-var wss = new WebSocketServer({ port: 8080 });
+var ursa = require('ursa');
+var fs = require('fs');
+var wss = new WebSocketServer({
+  verifyClient: function(info, cb) {
+    var encryptedMsg = info.req.headers.encrypted;
+    var hashedSig = info.req.headers.signed;
+    var deviceId = info.req.headers.devId;
+    var privkeyServer = ursa.createPrivateKey(fs.readFileSync('./serverkeys/privkey.pem'));
+    var pubkeyClient = ursa.createPublicKey(fs.readFileSync('./clientkeys/pubkey.pem'));
+    
+    var decrypted = privkeyServer.decrypt(encryptedMsg, 'base64', 'utf8');
+    var recrypted = new Buffer(decrypted).toString('base64');
+
+    if (!pubkeyClient.hashAndVerify('sha256', recrypted, hashedSig, 'base64')) {
+      console.log('Signature not verified!');
+      cb(false, 401, 'Unauthorized');
+
+    }
+    else { 
+      console.log('Signature verified!');
+      cb(true);
+    }
+  },
+   port: 8080 });
 
 var clientSockets = {};
 
