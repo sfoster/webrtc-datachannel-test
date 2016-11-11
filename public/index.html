@@ -41,7 +41,10 @@ The owner can issue an offer - this is proxied over the ws:
   </p>
   <audio controls></audio>
 
-  <script src="./adapter.js"></script>
+  <script src="./js/adapter.js"></script>
+  <script src="./js/filesender.js"></script>
+  <script src="./js/datareceiver.js"></script>
+  <script src="./js/deviceconnection.js"></script>
   <script>
   'use strict';
 
@@ -60,274 +63,12 @@ The owner can issue an offer - this is proxied over the ws:
     'dataChannelLabel': 'dc',
   };
 
-  // prepare config
-  // make a new peerConnection
-  //  talk to signalling server
-  //  establish datachannel
-  //  connect/disconnect
-  //  sendMessage
-  //  sendFile
-  //  on
-
-
-  function DeviceConnection(id, config) {
-    this.id = id;
-    this.config = Object.assign({
-      signalingURLProtocol: 'ws:',
-      signalingURLHostname: '0.0.0.0',
-      signalingURLPort: '8080',
-      signalingURLPath: '/'
-    }, config);
-  }
-  DeviceConnection.prototype = {
-    dataChannel: null,
-
-    logError: function(error) {
-      console.log(
-        'ERROR: ' + this.deviceId + ':' +
-        error.name + ': ' + error.message
-      );
-    },
-    log: function() {
-      var args = Array.prototype.slice.apply(arguments);
-      args.unshift('LOG:' + this.id + ':')
-      console.log.apply(console, args);
-    },
-
-    get signalingUrl() {
-      var url = '';
-      var config = this.config;
-      url += config.signalingURLProtocol;
-      url += '//';
-      url += config.signalingURLHostname;
-      url += ':';
-      url += config.signalingURLPort;
-      url += config.signalingURLPath;
-      url += '?deviceid=' + this.id;
-      return url;
-    },
-
-    connect: function() {
-      var localDescCreated = (desc) => {
-        this.log('localDescCreated');
-        this.peerConnection.setLocalDescription(desc, () => {
-          this.signalingSocket.send(JSON.stringify({
-            'sdp': this.peerConnection.localDescription
-          }));
-        }, this.logError.bind(this));
-      };
-
-      return this.openSignalingSocket()
-      .catch((err) => {
-        this.logError(err);
-      })
-      .then((ws) => {
-        this.createPeerDataChannel();
-
-        this.log('signaling ws open: ', this.signalingSocket);
-        this.log('peerConnection created: ', this.peerConnection);
-        this.log('dataChannel open: ', this.dataChannel);
-        var pc = this.peerConnection;
-        var ws = this.signalingSocket;
-
-        // hook up the rest of the handlers for the peer connection
-        pc.onicecandidate = (evt) => {
-          // send any ice candidates to the other peer
-          this.log('onicecandidate');
-          if (evt.candidate) {
-            ws.send(JSON.stringify({
-              'candidate': evt.candidate
-            }));
-          }
-        };
-
-        // 'negotiationneeded' is not getting fired?
-        pc.onnegotiationneeded = () => {
-          this.log('onnegotiationneeded');
-          pc.createOffer(localDescCreated, this.logError.bind(this));
-        }
-
-        pc.ondatachannel = (evt) => {
-          // once remote data arrives, show it
-          this.log('got datachannel on this peerConnection:', evt);
-          var channel = evt.channel;
-          var parts = [];
-          channel.onopen = (evt) => {
-            this.log('channel opened:', channel, evt);
-            this.emit('datachannelopen', evt);
-            this.dataChannel.send('hello from: ' + this.id);
-          }
-          channel.onclose = () => {
-            this.emit('datachannelclose', evt);
-            this.log('channel closed');
-          }
-          channel.onmessage = (evt) => {
-            this.emit('datachannelmessage', evt);
-          }
-        };
-
-        // hook up the rest of the handlers on the signalling websocket
-        ws.onmessage = (evt) => {
-          var message = JSON.parse(evt.data.toString());
-          if (message.welcome) {
-            this.log('got welcome message: ', message);
-          } else if (message.makeOffer) {
-            this.log('got makeOffer ws message');
-            this.peerConnection.createOffer(localDescCreated, this.logError.bind(this));
-          }
-          else if (message.sdp) {
-            pc.setRemoteDescription(new RTCSessionDescription(message.sdp), () => {
-              // if we received an offer, we need to answer
-              if (pc.remoteDescription.type == 'offer') {
-                pc.createAnswer(localDescCreated, this.logError.bind(this));
-              }
-            }, this.logError.bind(this));
-          }
-          else if (message.candidate) {
-            pc.addIceCandidate(new RTCIceCandidate(message.candidate));
-          }
-        };
-        ws.onclose = () => {
-          this.log('signaling websocket connection closed');
-          if (this._reconnectOnClose) {
-            setTimeout(this.connect.bind(this), 0);
-          }
-        };
-        ws.onerror = this.logError;
-      })
-      .catch((e) => {
-        this.logError(e);
-      });
-    },
-    openSignalingSocket: function() {
-      // open a websocket to the signaling server
-      // exchange offers and open a WebRTC DataChannel to the peer
-      var deviceId = this.id;
-      var signalingUrl = this.signalingUrl;
-      this.log('signalingUrl: ', signalingUrl);
-
-      var ws = this.signalingSocket;
-      return new Promise((res, rej) => {
-        var wsReadyState = ws && ws.readyState;
-        console.log('openSignalingSocket, wsReadyState: ', wsReadyState);
-        switch (wsReadyState) {
-          case 0:
-            // connecting
-            console.log('socket is connecting, resolve');
-            ws.onopen = () => { res(ws) };
-            break;
-          case 1:
-            // already open, we can use as-is
-            console.log('socket already open, resolve');
-            setTimeout(() => { res(ws)}, 0);
-            break;
-          case 2:
-            // connection is closing, fall thru'
-          default:
-            ws = this.signalingSocket = new WebSocket(signalingUrl);
-            ws.onopen = () => {
-              console.log('new socket open, resolve');
-              res(ws)
-            };
-        }
-      });
-    },
-
-    createPeerDataChannel: function() {
-      console.log('openDataChannelToPeer');
-
-      var pc = this.peerConnection;
-      var pcConnectionState = pc && pc.connectionState;
-      switch (pcConnectionState) {
-        case 'new':
-        case 'connecting':
-        case 'connected':
-          // TODO: some timeout or other failed-to-eventually-connect handling here?
-          break;
-        case 'disconnected':
-        case 'failed':
-        case 'closed':
-        default:
-          pc = this.peerConnection = new RTCPeerConnection({
-            iceServers: this.config.iceServers
-          });
-          console.log('created new peerConnection');
-          break;
-      }
-      var dataChannel = this.dataChannel;
-      var dataReadyState = dataChannel && dataChannel.readyState;
-      if (!dataChannel ||
-          dataChannel.readyState === 2 || dataChannel.readyState === 3) {
-        dataChannel = pc.createDataChannel(this.config.dataChannelLabel);
-        this.dataChannel = dataChannel;
-        console.log('created new dataChannel:', dataChannel.readyState, dataChannel);
-      }
-      return dataChannel;
-    },
-    disconnect: function() {
-      this.log('TODO: implement disconnect');
-    },
-    sendMessage: function(msg) {
-      this.dataChannel.send(msg);
-    },
-    sendFile: function(url) {
-      var fileSender = new FileSender(this.dataChannel);
-      fileSender.send(url);
-    },
-    emit: function() {}
-  };
-
   function playBlobAsAudio(blob) {
     var sourceUrl = URL.createObjectURL(blob)
     var audio = document.querySelector('audio');
     audio.src = sourceUrl;
     audio.load();
     audio.play();
-  }
-
-  var dataReceiver = {
-    state: '',
-    contentType: null,
-    chunks: [],
-    completeFileReceived: function() {
-      var fileBlob = new Blob(this.chunks, { type: this.contentType || '' });
-      console.log('got fileBlob: ', fileBlob);
-      this.chunks.length = 0;
-      this.contentType = null;
-      this.state = '';
-      playBlobAsAudio(fileBlob);
-    },
-    onMessage: function(event) {
-      var type = event.data instanceof Blob  ? 'blob': 'string';
-      var nextState;
-      console.log('onMessage, state: ' + this.state, type, event.data);
-      switch (this.state) {
-        case 'receiving-chunks' :
-          if (type === 'string' && event.data === '\n\n') {
-            this.completeFileReceived();
-          } else if (type === 'blob') {
-            this.chunks.push(event.data);
-          } else {
-            console.warn('unexpected message content: ', type, event);
-          }
-          break;
-        case '' :
-          if (type === 'string') {
-            if (event.data.indexOf('{') > -1 &&
-                event.data.indexOf('contentType') > -1) {
-              var header = JSON.parse(event.data);
-              this.contentType = header.contentType;
-              this.state = 'receiving-chunks';
-            } else {
-              // generic message, unrelated to our file-sending/receiving
-              console.log('DataChannel message: ', event.data);
-            }
-          } else {
-            console.warn('unexpected message content: ', type, event);
-          }
-          break;
-      }
-    }
   }
 
   function stop() {
@@ -339,115 +80,42 @@ The owner can issue an offer - this is proxied over the ws:
   }
 
   function sendFile(url) {
+    console.assert(gDeviceConnection && gDeviceConnection.dataChannel);
     var contentType = '';
     if (url.endsWith('.mp3')) {
       contentType = 'audio/mpeg';
     } else if (url.endsWith('.wav')) {
       contentType = 'audio/x-wav';
     }
-    gDeviceConnection.sendFile(url, contentType);
+    var fileSender = new FileSender(gDeviceConnection.dataChannel, {
+      contentType: contentType,
+      url: url
+    });
+    fileSender.send();
   }
-
-  function FileSender(dataChannel, options) {
-    this.dataChannel = dataChannel;
-    if (options) {
-      for (var key in options) {
-        this[key] = options[key];
-      }
-    }
-  }
-
-  FileSender.prototype = {
-    totalSize: 0,
-    lastChunkSize: 0,
-    offset: 0,
-    CHUNK_SIZE: 1024 * 16,
-    fileBlob: null,
-    contentType: null,
-
-    send: function(url) {
-      if (!(this.dataChannel && this.dataChannel.readyState == 'open')) {
-        console.warn('Data channel not ready');
-        return;
-      }
-      if (url) {
-        this.url = url;
-      }
-      console.assert(this.url);
-      this.dataChannel.binaryType = 'blob';
-
-      window.fetch(this.url).then((res) => {
-        return res.blob();
-      }).then((fileBlob) => {
-        this.fileBlob = fileBlob;
-        console.log('fetched: ' + url, fileBlob);
-        this.totalSize = fileBlob.size;
-        this.contentType = fileBlob.type;
-        this.sendHeader();
-        window.setTimeout(this.nextChunk.bind(this), 0);
-      }).catch((e) => {
-        console.error('Failed to fetch file: ', e);
-      });
-      // could return promise at completion?
-    },
-    nextChunk: function() {
-      console.log('next: totalSize: %s, offset: %s, lastChunkSize: %s',
-                  this.totalSize, this.offset, this.lastChunkSize);
-      if (this.totalSize > this.offset + this.lastChunkSize) {
-        var chunk = this.fileBlob.slice(this.offset, this.offset+this.CHUNK_SIZE, this.contentType);
-        this.sendChunk(chunk);
-        this.offset += this.CHUNK_SIZE;
-      } else {
-        this.sendEOF();
-      }
-    },
-    sendHeader: function() {
-      console.log('sendHeader');
-      if (!(this.dataChannel && this.dataChannel.readyState == 'open')) {
-        console.warn('Data channel not ready');
-        return;
-      }
-      this.dataChannel.send(JSON.stringify({
-        contentType: this.contentType,
-        url: this.url
-      }));
-    },
-    sendEOF: function() {
-      console.log('sendEOF');
-      if (!(this.dataChannel && this.dataChannel.readyState == 'open')) {
-        console.warn('Data channel not ready');
-        return;
-      }
-      this.dataChannel.send('\n\n');
-    },
-    sendChunk: function(chunk) {
-      this.lastChunkSize = chunk.size;
-      if (this.dataChannel.readyState !== 'open') {
-        console.log('dataChannel closed mid-send');
-        return;
-      }
-      this.dataChannel.send(chunk);
-      window.setTimeout(this.nextChunk.bind(this), 0);
-    }
-  };
 
   var gDeviceConnection;
+
   function connectAs(deviceId) {
     if (gDeviceConnection) {
       gDeviceConnection.disconnect();
     }
+    var dataReceiver = new DataReceiver();
+    dataReceiver.on('filereceived', function(event) {
+      console.log('filereceived, got event: ', event);
+      playBlobAsAudio(event.data);
+    });
+
     gDeviceConnection = new DeviceConnection(deviceId, configuration);
-    // implement a browser-friendly emit
-    gDeviceConnection.emit = function(type, event) {
-      switch (type) {
-        case 'datachannelopen':
-          this.dataChannel.send('hello from: ' + this.id);
-          break;
-        case 'datachannelmessage':
-          dataReceiver.onMessage(event);
-          break;
-      }
-    }
+
+    gDeviceConnection.on('datachannelopen', () => {
+      gDeviceConnection.dataChannel.send('hello from: ' +
+        gDeviceConnection.id);
+    });
+    gDeviceConnection.on('datachannelmessage', (event) => {
+      dataReceiver.onMessage(event);
+    });
+
     gDeviceConnection.connect();
   }
 
