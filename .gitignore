@@ -1,6 +1,2 @@
-server/node_modules
-server/serverkeys
-server/clientkeys
+node-client/.keys
 node-client/node_modules
-node-client/serverkeys
-node-client/clientkeys

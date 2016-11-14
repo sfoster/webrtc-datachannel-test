@@ -2,10 +2,14 @@
 var Sound = require('node-aplay');
 var tmp = require('tmp');
 var fs = require('fs');
+var path = require('path');
 var ursa = require('ursa');
 var DeviceConnection = require('./deviceconnection').DeviceConnection;
 var DataReceiver = require('./datareceiver').DataReceiver;
 var FileSender = require('./filesender').FileSender;
+
+var keydir = path.join(__dirname, '.keys');
+var serverKeyId = 'signaling_server';
 
 /** CONFIG **/
 var deviceId = process.env.HAIKU_DEVICE_ID || 'node-client-a';
@@ -31,8 +35,26 @@ function connectAs(deviceId) {
     gDeviceConnection.disconnect();
   }
 
-  var privkeyClient = ursa.createPrivateKey(fs.readFileSync('./clientkeys/privkey.pem'));
-  var pubkeyServer = ursa.createPublicKey(fs.readFileSync('./serverkeys/pubkey.pem'));
+  console.log('Connecting as: ' + deviceId);
+  var pubkeyServerFilename = path.join(keydir, serverKeyId + '.pub.pem');
+  var privkeyClientFilename = path.join(keydir, deviceId + '.pem');
+  console.log('privkeyClientFilename: ', privkeyClientFilename);
+  var pubkeyServer;
+  var privkeyClient;
+
+  if (fs.existsSync(privkeyClientFilename)) {
+    privkeyClient = ursa.createPrivateKey( fs.readFileSync(privkeyClientFilename) );
+  } else {
+    throw new Error('Private key for device "'+deviceId+'" not found');
+  }
+
+  if (fs.existsSync(pubkeyServerFilename)) {
+    pubkeyServer = ursa.createPublicKey(fs.readFileSync(pubkeyServerFilename));
+  } else {
+    // TODO: just send rejection?
+    throw new Error('Public key for server: "' +serverKeyId + '" not found');
+  }
+
   var msg = 'secret msg';
   var encrypt = pubkeyServer.encrypt(msg, 'utf8', 'base64');
   var sign = privkeyClient.hashAndSign('sha256', msg, 'utf8', 'base64');
@@ -40,7 +62,8 @@ function connectAs(deviceId) {
   configuration.signalingSocketOptions = {
     headers: {
       encrypted: encrypt,
-      signed: sign
+      signed: sign,
+      deviceid: deviceId
     }
   };
 
