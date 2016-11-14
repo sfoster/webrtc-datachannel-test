@@ -1,6 +1,9 @@
 const readline = require('readline');
-var Recorder = require('./recorder').Recorder;
 var Sound = require('node-aplay');
+var Recorder = require('./recorder').Recorder;
+// var DeviceConnection = require('./deviceconnection').DeviceConnection;
+// var DataReceiver = require('./datareceiver').DataReceiver;
+// var FileSender = require('./filesender').FileSender;
 
 var emojiLookup = require('./emoticon2emoji.js');
 var state = ''; // 'startrecording', 'recording', 'sending', ''
