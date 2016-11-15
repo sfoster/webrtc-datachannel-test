@@ -5,7 +5,6 @@ var fs = require('fs');
 var path = require('path');
 var ursa = require('ursa');
 var DeviceConnection = require('./deviceconnection').DeviceConnection;
-var DataReceiver = require('./datareceiver').DataReceiver;
 var FileSender = require('./filesender').FileSender;
 
 var keydir = path.join(__dirname, '.keys');
@@ -67,25 +66,20 @@ function connectAs(deviceId) {
     }
   };
 
-  var dataReceiver = new DataReceiver();
-  dataReceiver.on('filereceived', function(event) {
-    console.log('filereceived, got event: ', event);
-    playBufferAsAudio(event.data, event.contentType);
-  });
-
   gDeviceConnection = new DeviceConnection(deviceId, configuration);
 
   gDeviceConnection.on('datachannelopen', () => {
-    gDeviceConnection.dataChannel.send('hello from: ' +
-      gDeviceConnection.id);
+    gDeviceConnection.dataChannel.send('hello from: ' + gDeviceConnection.id);
     // TEST it works
     if (deviceId.includes('-a')) {
       var fileSender = new FileSender(gDeviceConnection.dataChannel);
       fileSender.send('./bird.wav', ' audio/x-wav');
     }
   });
-  gDeviceConnection.on('datachannelmessage', (event) => {
-    dataReceiver.onMessage(event);
+
+  gDeviceConnection.on('filereceived', function(event) {
+    console.log('filereceived, got event: ', event);
+    playBufferAsAudio(event.data, event.contentType);
   });
 
   gDeviceConnection.connect();
