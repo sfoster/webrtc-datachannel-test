@@ -5,7 +5,7 @@ const EventEmitter = require('events').EventEmitter;
 var util = require('util')
 const spawn = require('child_process').spawn;
 
-var MAX_RECORD_SECONDS = 20;
+var MAX_RECORD_SECONDS = 60;
 var RecorderOptions = {
   duration: 1+MAX_RECORD_SECONDS, // stop recording after n+1 seconds. Our setTimeout/kill should kick in first.
   maxFileTime: 60, // roll over into a new file after 60s. We should never hit this!
@@ -76,7 +76,7 @@ Object.assign(Recorder.prototype, {
         // stop recording automatically after n seconds
         this._recordTimerId = setTimeout(() => {
           if(cprocess && cprocess.pid) {
-            console.log('times up, killing ' + cprocess.pid);
+            console.log('times up, killing ' + cprocess.pid + ' after ' + (MAX_RECORD_SECONDS*1000) + 'ms');
             cprocess.kill();
           }
           console.log('/killing');

@@ -6,6 +6,12 @@ var RTCPeerConnection     = webrtc.RTCPeerConnection;
 var RTCSessionDescription = webrtc.RTCSessionDescription;
 var RTCIceCandidate       = webrtc.RTCIceCandidate;
 
+function toBuffer(ab) {
+  // convert ArrayBuffer to Buffer
+  var buf = Buffer.from(new Uint8Array(ab));
+  return buf;
+}
+
 function DeviceConnection(id, config) {
   this.id = id;
   this.config = Object.assign({
@@ -17,9 +23,14 @@ function DeviceConnection(id, config) {
     signalingSocketProtocols: '',
   }, config);
   this._handlers = {};
+  this._receivedChunks = [];
 }
+
 DeviceConnection.prototype = {
   dataChannel: null,
+  _receivedState: '',
+  _receivedContentType: null,
+  _receivedChunks: null,
 
   logError: function(error) {
     console.log(
@@ -101,6 +112,7 @@ DeviceConnection.prototype = {
         }.bind(this);
         channel.onmessage = function(evt) {
           this.emit('datachannelmessage', evt);
+          this.onDataReceived(evt);
         }.bind(this);
       };
 
@@ -206,6 +218,55 @@ DeviceConnection.prototype = {
     }
     return dataChannel;
   },
+
+  completeFileReceived: function() {
+    var body = Buffer.concat(this._receivedChunks);
+    this.emit('filereceived', {
+      type: 'filereceived',
+      data: body,
+      contentType: this._receivedContentType
+    });
+    this._receivedChunks.length = 0;
+    this._receivedContentType = null;
+    this._receivedState = '';
+  },
+
+  onDataReceived: function(event) {
+    var type = typeof event.data === 'string' ? 'string': 'arraybuffer';
+    var nextState;
+    console.log('onMessage, state: ' + this._receivedState, type, event.data);
+    switch (this._receivedState) {
+      case 'receiving-chunks' :
+        if (type === 'string' && event.data === '\n\n') {
+          this.completeFileReceived();
+        } else if (type === 'arraybuffer') {
+          this._receivedChunks.push(toBuffer(event.data));
+        } else {
+          console.warn('unexpected message content: ', type, event);
+        }
+        break;
+      case '' :
+        if (type === 'string') {
+          if (event.data.includes('{') &&
+              event.data.includes('contentType')) {
+            var header = JSON.parse(event.data);
+            this._receivedContentType = header.contentType;
+            this._receivedState = 'receiving-chunks';
+          } else {
+            // generic message, unrelated to our file-sending/receiving
+            this.emit('messagereceived', {
+              type: 'emoji',
+              data: event.data,
+              contentType: 'text/plain' // or encoding?
+            });
+          }
+        } else {
+          console.warn('unexpected message content: ', type, event);
+        }
+        break;
+    }
+  },
+
   disconnect: function() {
     this.log('TODO: implement disconnect');
   },
